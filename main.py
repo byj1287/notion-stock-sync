@@ -32,44 +32,59 @@ def get_usd_krw_rate():
 
 def main():
     rate = get_usd_krw_rate()
-    pages = notion.databases.query(database_id=DATABASE_ID)["results"]
+    
+    # 최신 notion-client 라이브러리 규격 호환
+    try:
+        response = notion.databases.query(database_id=DATABASE_ID)
+    except AttributeError:
+        response = notion.databases.retrieve(database_id=DATABASE_ID)
+        # 쿼리 지원 버전 대응
+        from notion_client.helpers import collect_paginated_api
+        response = {"results": list(collect_paginated_api(notion.databases.query, database_id=DATABASE_ID))}
+        
+    pages = response.get("results", [])
     
     for page in pages:
         props = page["properties"]
         
-        # 1. 티커(종목코드) 가져오기
+        # 1. 티커 확인
         ticker_cell = props.get("티커", {}).get("rich_text", []) or props.get("주식 티커", {}).get("rich_text", [])
         if not ticker_cell:
             continue
         ticker = ticker_cell[0]["plain_text"].strip()
         
-        # 2. 국가/시장 구분 확인
-        market_select = props.get("시장", {}).get("select") or props.get("국가", {}).get("select")
-        market_name = market_select.get("name", "") if market_select else ""
+        # 2. 국가/시장 확인
+        country_select = props.get("국가", {}).get("select") or props.get("시장", {}).get("select")
+        country_name = country_select.get("name", "") if country_select else ""
         
-        # 3. 시세 조회
+        # 3. 가격 및 환율 수집
         current_price = None
         current_fx = 1
         
-        if "미국" in market_name or "해외" in market_name:
+        if "미국" in country_name or "해외" in country_name:
             current_price = get_us_price(ticker)
             current_fx = rate
         else:
-            # 6자리 숫자만 추출 (예: 005930, 214450)
             clean_code = "".join(filter(str.isdigit, ticker))
             if clean_code:
                 current_price = get_krx_price(clean_code)
         
-        # 4. 노션 DB 속성 갱신
+        # 4. 노션 DB 업데이트
         if current_price is not None:
-            update_data = {
-                "현재 주가": {"number": current_price}
-            }
+            update_data = {}
+            if "현재 주가" in props:
+                update_data["현재 주가"] = {"number": current_price}
+            elif "현재 주가 (작성)" in props:
+                update_data["현재 주가 (작성)"] = {"number": current_price}
+                
             if "현재 환율" in props:
                 update_data["현재 환율"] = {"number": current_fx}
+            elif "현재 환율 (작성)" in props:
+                update_data["현재 환율 (작성)"] = {"number": current_fx}
                 
-            notion.pages.update(page_id=page["id"], properties=update_data)
-            print(f"[{ticker}] 업데이트 완료: {current_price}")
+            if update_data:
+                notion.pages.update(page_id=page["id"], properties=update_data)
+                print(f"[{ticker}] 업데이트 완료: {current_price}")
 
 if __name__ == "__main__":
     main()
