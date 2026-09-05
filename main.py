@@ -2,15 +2,19 @@ import os
 import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
-from notion_client import Client
 
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
+DATABASE_ID = os.environ["NOTION_DATABASE_ID"].strip()
 
-notion = Client(auth=NOTION_TOKEN)
+# 노션 공식 API 헤더
+NOTION_HEADERS = {
+    "Authorization": f"Bearer {NOTION_TOKEN}",
+    "Notion-Version": "2022-06-28",
+    "Content-Type": "application/json"
+}
 
 def get_krx_price(code):
-    # 네이버페이 증권에서 당일 종가 수집
+    # 네이버페이 증권 종가 크롤링
     url = f"https://finance.naver.com/item/main.naver?code={code}"
     headers = {"User-Agent": "Mozilla/5.0"}
     res = requests.get(url, headers=headers)
@@ -19,13 +23,13 @@ def get_krx_price(code):
     return int(price_tag.text.replace(",", "")) if price_tag else None
 
 def get_us_price(ticker):
-    # 야후 파이낸스에서 미국 종가 수집
+    # 야후 파이낸스 미국 주가
     stock = yf.Ticker(ticker)
     data = stock.history(period="1d")
     return round(float(data["Close"].iloc[-1]), 2) if not data.empty else None
 
 def get_usd_krw_rate():
-    # 원/달러 기준 환율 수집
+    # 원/달러 환율
     fx = yf.Ticker("KRW=X")
     data = fx.history(period="1d")
     return round(float(data["Close"].iloc[-1]), 2) if not data.empty else 1350.0
@@ -33,16 +37,15 @@ def get_usd_krw_rate():
 def main():
     rate = get_usd_krw_rate()
     
-    # 최신 notion-client 라이브러리 규격 호환
-    try:
-        response = notion.databases.query(database_id=DATABASE_ID)
-    except AttributeError:
-        response = notion.databases.retrieve(database_id=DATABASE_ID)
-        # 쿼리 지원 버전 대응
-        from notion_client.helpers import collect_paginated_api
-        response = {"results": list(collect_paginated_api(notion.databases.query, database_id=DATABASE_ID))}
+    # 노션 데이터베이스 직접 조회 (REST API)
+    url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
+    res = requests.post(url, headers=NOTION_HEADERS)
+    
+    if res.status_code != 200:
+        print(f"노션 조회 실패: {res.status_code}, {res.text}")
+        return
         
-    pages = response.get("results", [])
+    pages = res.json().get("results", [])
     
     for page in pages:
         props = page["properties"]
@@ -69,7 +72,7 @@ def main():
             if clean_code:
                 current_price = get_krx_price(clean_code)
         
-        # 4. 노션 DB 업데이트
+        # 4. 노션 DB 속성 업데이트
         if current_price is not None:
             update_data = {}
             if "현재 주가" in props:
@@ -83,8 +86,12 @@ def main():
                 update_data["현재 환율 (작성)"] = {"number": current_fx}
                 
             if update_data:
-                notion.pages.update(page_id=page["id"], properties=update_data)
-                print(f"[{ticker}] 업데이트 완료: {current_price}")
+                patch_url = f"https://api.notion.com/v1/pages/{page['id']}"
+                patch_res = requests.patch(patch_url, headers=NOTION_HEADERS, json={"properties": update_data})
+                if patch_res.status_code == 200:
+                    print(f"[{ticker}] 업데이트 완료: {current_price}")
+                else:
+                    print(f"[{ticker}] 업데이트 실패: {patch_res.text}")
 
 if __name__ == "__main__":
     main()
